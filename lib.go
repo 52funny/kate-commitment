@@ -81,3 +81,51 @@ func CommitPolynomial(pp *PublicParameters, coeffs []fr.Element) (*bls12381.G1Af
 	}
 	return new(bls12381.G1Affine).FromJacobian(c), nil
 }
+
+func CreateWitness(pp *PublicParameters, coeffs []fr.Element, x0 fr.Element) (*bls12381.G1Affine, error) {
+	if len(coeffs) > pp.t+1 {
+		return nil, fmt.Errorf("coefficients length must less or equal t+1")
+	}
+
+	// the value of the polynomial at x0
+	y := computePolynomial(coeffs, x0)
+
+	coeffsCopy := make([]fr.Element, len(coeffs))
+	copy(coeffsCopy, coeffs)
+
+	// f(x) - y
+	coeffsCopy[0].Sub(&coeffsCopy[0], y)
+
+	// B(x) = x - y
+	bx := []fr.Element{
+		*new(fr.Element).Neg(y),
+		fr.One(),
+	}
+
+	// q(x) = (f(x) - y) / (x - x0)
+	qx, err := PolyDiv(coeffsCopy, bx)
+	if err != nil {
+		return nil, err
+	}
+
+	// c = \prod_{i=0}^t (g^{\alpha^i}) ^ {qx[i]}
+	c := new(bls12381.G1Jac).FromAffine(new(bls12381.G1Affine).SetInfinity())
+	for i, val := range qx {
+		parts := new(bls12381.G1Jac).ScalarMultiplication(pp.gJac[i], val.BigInt(new(big.Int)))
+		c.AddAssign(parts)
+	}
+	return new(bls12381.G1Affine).FromJacobian(c), nil
+}
+
+// Calculate the polynomial f(x) value at x.
+func computePolynomial(coeffs []fr.Element, x fr.Element) *fr.Element {
+	if len(coeffs) == 0 {
+		return new(fr.Element).SetInt64(0)
+	}
+	res := new(fr.Element).Set(&coeffs[0])
+	for i := 1; i < len(coeffs); i++ {
+		res.Mul(res, &x)
+		res.Add(res, &coeffs[i])
+	}
+	return res
+}
