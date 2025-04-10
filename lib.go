@@ -64,3 +64,20 @@ func Setup(t int) PublicParameters {
 	}
 	return pp
 }
+
+// CommitPolynomial computes the commitment to a polynomial f(x) = a_0 + a_1 * x + ... + a_t * x^t.
+// It's return the commitment c = g^{a_0} * g^{\alpha a_1} * g^{\alpha^2 a_2} * ... * g^{\alpha^t a_t}.
+func CommitPolynomial(pp *PublicParameters, coeffs []fr.Element) (*bls12381.G1Affine, error) {
+	if len(coeffs) > pp.t+1 {
+		return nil, fmt.Errorf("coefficients length must less or equal t+1")
+	}
+
+	// c = \prod_{i=0}^t (g^{\alpha^i}) ^ {coeffs[i]}
+	c := new(bls12381.G1Jac).FromAffine(new(bls12381.G1Affine).SetInfinity())
+
+	for i, val := range coeffs {
+		parts := new(bls12381.G1Jac).ScalarMultiplication(pp.gJac[i], val.BigInt(new(big.Int)))
+		c.AddAssign(parts)
+	}
+	return new(bls12381.G1Affine).FromJacobian(c), nil
+}
