@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	katecommitment "github.com/52funny/kate-commitment"
-	"github.com/go-playground/assert/v2"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestSetup(t *testing.T) {
