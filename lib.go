@@ -15,7 +15,7 @@ import (
 type PublicParameters struct {
 	t       int
 	gAffine []*bls12381.G1Affine
-	gJac    []*bls12381.G1Jac
+	hAffine []*bls12381.G2Affine
 }
 
 // Return all the public parameters in G1.
@@ -40,17 +40,17 @@ func Setup(t int) PublicParameters {
 	alpha := new(fr.Element)
 	alpha.SetRandom()
 
-	gJac := make([]*bls12381.G1Jac, 0, t+1)
-
 	gAffine := make([]*bls12381.G1Affine, 0, t+1)
+	hAffine := make([]*bls12381.G2Affine, 0, t+1)
 
 	tmp := fr.One()
 
 	for range t + 1 {
 		gExp := new(bls12381.G1Jac).ScalarMultiplicationBase(tmp.BigInt(new(big.Int)))
-		gJac = append(gJac, gExp)
+		hExp := new(bls12381.G2Jac).ScalarMultiplicationBase(tmp.BigInt(new(big.Int)))
 
 		gAffine = append(gAffine, new(bls12381.G1Affine).FromJacobian(gExp))
+		hAffine = append(hAffine, new(bls12381.G2Affine).FromJacobian(hExp))
 
 		// tmp self multiply by alpha
 		// 1, alpha, alpha^2, ..., alpha^t
@@ -60,7 +60,7 @@ func Setup(t int) PublicParameters {
 	pp := PublicParameters{
 		t:       t,
 		gAffine: gAffine,
-		gJac:    gJac,
+		hAffine: hAffine,
 	}
 	return pp
 }
@@ -73,32 +73,30 @@ func CommitPolynomial(pp *PublicParameters, coeffs []fr.Element) (*bls12381.G1Af
 	}
 
 	// c = \prod_{i=0}^t (g^{\alpha^i}) ^ {coeffs[i]}
-	c := new(bls12381.G1Jac).FromAffine(new(bls12381.G1Affine).SetInfinity())
+	c := new(bls12381.G1Affine).SetInfinity()
 
 	for i, val := range coeffs {
-		parts := new(bls12381.G1Jac).ScalarMultiplication(pp.gJac[i], val.BigInt(new(big.Int)))
-		c.AddAssign(parts)
+		parts := new(bls12381.G1Affine).ScalarMultiplication(pp.gAffine[i], val.BigInt(new(big.Int)))
+		c.Add(c, parts)
 	}
-	return new(bls12381.G1Affine).FromJacobian(c), nil
+	return c, nil
 }
 
-func CreateWitness(pp *PublicParameters, coeffs []fr.Element, x0 fr.Element) (*bls12381.G1Affine, error) {
+// CreateWitness computes the witness at the polynomial q(x).
+func CreateWitness(pp *PublicParameters, coeffs []fr.Element, x0 fr.Element, y0 fr.Element) (*bls12381.G1Affine, error) {
 	if len(coeffs) > pp.t+1 {
 		return nil, fmt.Errorf("coefficients length must less or equal t+1")
 	}
-
-	// the value of the polynomial at x0
-	y := computePolynomial(coeffs, x0)
 
 	coeffsCopy := make([]fr.Element, len(coeffs))
 	copy(coeffsCopy, coeffs)
 
 	// f(x) - y
-	coeffsCopy[0].Sub(&coeffsCopy[0], y)
+	coeffsCopy[0].Sub(&coeffsCopy[0], &y0)
 
 	// B(x) = x - y
 	bx := []fr.Element{
-		*new(fr.Element).Neg(y),
+		*new(fr.Element).Neg(&x0),
 		fr.One(),
 	}
 
@@ -109,23 +107,51 @@ func CreateWitness(pp *PublicParameters, coeffs []fr.Element, x0 fr.Element) (*b
 	}
 
 	// c = \prod_{i=0}^t (g^{\alpha^i}) ^ {qx[i]}
-	c := new(bls12381.G1Jac).FromAffine(new(bls12381.G1Affine).SetInfinity())
+	c := new(bls12381.G1Affine).SetInfinity()
 	for i, val := range qx {
-		parts := new(bls12381.G1Jac).ScalarMultiplication(pp.gJac[i], val.BigInt(new(big.Int)))
-		c.AddAssign(parts)
+		parts := new(bls12381.G1Affine).ScalarMultiplication(pp.gAffine[i], val.BigInt(new(big.Int)))
+		c.Add(c, parts)
 	}
-	return new(bls12381.G1Affine).FromJacobian(c), nil
+	return c, nil
+}
+
+// Verify algorithm verifies the witness.
+func Verify(pp *PublicParameters, c *bls12381.G1Affine, witness *bls12381.G1Affine, x0 fr.Element, y0 fr.Element) (bool, error) {
+	_, _, g, h := bls12381.Generators()
+
+	gNegy := new(bls12381.G1Affine).ScalarMultiplication(&g, y0.BigInt(new(big.Int)))
+
+	cMinusgNegy := new(bls12381.G1Affine).Sub(c, gNegy)
+
+	left, err := bls12381.Pair([]bls12381.G1Affine{*cMinusgNegy}, []bls12381.G2Affine{h})
+	if err != nil {
+		return false, err
+	}
+
+	// h^x0
+	hX0 := new(bls12381.G2Affine).ScalarMultiplication(&h, x0.BigInt(new(big.Int)))
+	tmp := new(bls12381.G2Affine).Sub(pp.hAffine[1], hX0)
+
+	right, err := bls12381.Pair([]bls12381.G1Affine{*witness}, []bls12381.G2Affine{*tmp})
+	if err != nil {
+		return false, err
+	}
+
+	return left.Equal(&right), nil
 }
 
 // Calculate the polynomial f(x) value at x.
-func computePolynomial(coeffs []fr.Element, x fr.Element) *fr.Element {
+func ComputePolynomial(coeffs []fr.Element, x fr.Element) fr.Element {
 	if len(coeffs) == 0 {
-		return new(fr.Element).SetInt64(0)
+		return fr.NewElement(0)
 	}
+	xCopy := fr.Element{}
+	xCopy.Set(&x)
 	res := new(fr.Element).Set(&coeffs[0])
 	for i := 1; i < len(coeffs); i++ {
-		res.Mul(res, &x)
-		res.Add(res, &coeffs[i])
+		tmp := new(fr.Element).Mul(&xCopy, &coeffs[i])
+		res.Add(res, tmp)
+		xCopy.Mul(&xCopy, &x)
 	}
-	return res
+	return *res
 }
